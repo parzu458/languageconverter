@@ -1,9 +1,5 @@
 'use client';
 
-// Traduzione interamente nel browser con Transformers.js (file statico in
-// /public/vendor/transformers/, caricato senza passare dal bundler).
-// Ogni coppia di lingue usa un modello OPUS-MT (~80-90MB), scaricato una
-// sola volta da Hugging Face e poi tenuto in cache dal browser.
 
 export const LANGUAGES = {
   en: 'Inglese',
@@ -19,27 +15,49 @@ export function targetsFor(src: LangCode): LangCode[] {
   return src === 'en' ? ['it', 'fr', 'de', 'es'] : ['en'];
 }
 
-const VENDOR_URL = '/vendor/transformers/transformers.min.js';
-
 type ProgressInfo = { status: string; loaded?: number; total?: number };
+type Pending = {
+  resolve: (v: any) => void;
+  reject: (e: Error) => void;
+  onProgress?: (i: ProgressInfo) => void;
+};
 
-const translators = new Map<string, Promise<any>>();
+// Il modello gira in un Web Worker (public/translate-worker.mjs), non sul
+// thread principale: così la pagina non si blocca durante la traduzione.
+let worker: Worker | null = null;
+let nextId = 1;
+const pending = new Map<number, Pending>();
 
-async function getTranslator(src: LangCode, tgt: LangCode, onProgress?: (i: ProgressInfo) => void) {
-  const key = `${src}-${tgt}`;
-  if (!translators.has(key)) {
-    const p = (async () => {
-      const { pipeline, env } = await import(/* webpackIgnore: true */ VENDOR_URL);
-      env.allowLocalModels = false;
-      env.backends.onnx.wasm.wasmPaths = '/vendor/transformers/';
-      env.backends.onnx.wasm.numThreads = 1;
-      return pipeline('translation', `Xenova/opus-mt-${key}`, { progress_callback: onProgress });
-    })();
-    // Se il caricamento fallisce, non lasciare in cache una promise rotta.
-    p.catch(() => translators.delete(key));
-    translators.set(key, p);
+function getWorker(): Worker {
+  if (!worker) {
+    const w = new Worker('/translate-worker.mjs', { type: 'module' });
+    w.onmessage = (e: MessageEvent) => {
+      const m = e.data;
+      const p = pending.get(m.id);
+      if (!p) return;
+      if (m.type === 'progress') return p.onProgress?.(m.info);
+      pending.delete(m.id);
+      if (m.type === 'error') p.reject(new Error(m.error));
+      else p.resolve(m.result);
+    };
+    w.onerror = (e: ErrorEvent) => {
+      const err = new Error('Errore nel traduttore: ' + (e.message || 'impossibile avviare il worker'));
+      pending.forEach((p) => p.reject(err));
+      pending.clear();
+      w.terminate();
+      worker = null;
+    };
+    worker = w;
   }
-  return translators.get(key)!;
+  return worker;
+}
+
+function call(msg: Record<string, unknown>, onProgress?: (i: ProgressInfo) => void): Promise<any> {
+  return new Promise((resolve, reject) => {
+    const id = nextId++;
+    pending.set(id, { resolve, reject, onProgress });
+    getWorker().postMessage({ id, ...msg });
+  });
 }
 
 export async function preloadTranslationModel(
@@ -47,11 +65,9 @@ export async function preloadTranslationModel(
   tgt: LangCode,
   onProgress?: (i: ProgressInfo) => void
 ) {
-  await getTranslator(src, tgt, onProgress);
+  await call({ type: 'load', key: `${src}-${tgt}` }, onProgress);
 }
 
 export async function translateChunkLocally(chunk: string, src: LangCode, tgt: LangCode): Promise<string> {
-  const translator = await getTranslator(src, tgt);
-  const out: any = await translator(chunk, { max_new_tokens: 512 });
-  return Array.isArray(out) ? out[0].translation_text : out.translation_text;
+  return call({ type: 'translate', key: `${src}-${tgt}`, text: chunk });
 }
