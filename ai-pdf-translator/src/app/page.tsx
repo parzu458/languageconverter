@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { extractPdfChunks } from '@/lib/pdfExtract';
+import { extractPdfChunks, chunkText } from '@/lib/pdfExtract';
 import {
   preloadTranslationModel,
   translateChunkLocally,
@@ -9,6 +9,10 @@ import {
   targetsFor,
   type LangCode,
 } from '@/lib/translateLocal';
+
+// Lascia respirare il browser: senza questa pausa, il calcolo del modello
+// occupa il thread principale e l'interfaccia non si ridisegna.
+const tick = () => new Promise<void>((r) => setTimeout(r, 60));
 
 export default function Home() {
   const [file, setFile] = useState<File | null>(null);
@@ -24,6 +28,7 @@ export default function Home() {
   const srcBox = useRef<HTMLPreElement>(null);
   const outBox = useRef<HTMLPreElement>(null);
 
+  // Durante la traduzione, tieni in vista l'ultimo testo tradotto.
   useEffect(() => {
     if (!busy) return;
     const o = outBox.current;
@@ -95,17 +100,23 @@ export default function Home() {
       });
 
       setStatus('Leggo il PDF');
-      const chunks = await extractPdfChunks(f, (done, total) =>
+      let chunks = await extractPdfChunks(f, (done, total) =>
         setProgress(0.3 + (done / total) * 0.1)
       );
       if (!chunks.length) throw new Error('Nessun testo trovato: il PDF potrebbe essere una scansione.');
 
       setSource(chunks.join('\n\n'));
+      // Blocchi più piccoli = aggiornamenti più frequenti a schermo.
+      chunks = chunks.flatMap((c) => chunkText(c, 600));
+      setProgress(0.4);
+      await tick();
       const out: string[] = [];
       for (let i = 0; i < chunks.length; i++) {
         setStatus(`Traduzione in corso (${i + 1} di ${chunks.length})`);
+        await tick();
         out.push(await translateChunkLocally(chunks[i], src, tgt));
         setResult(out.join('\n\n'));
+        await tick();
         setProgress(0.4 + ((i + 1) / chunks.length) * 0.6);
       }
 
