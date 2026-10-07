@@ -95,7 +95,7 @@ export default function Home() {
     setResult('');
     try {
       setStatus('Preparo il traduttore (la prima volta scarica ~90 MB)');
-      await preloadTranslationModel(src, tgt, (i) => {
+      const size = await preloadTranslationModel(src, tgt, (i) => {
         if (i.total && i.loaded) setProgress((i.loaded / i.total) * 0.3);
       });
 
@@ -110,15 +110,39 @@ export default function Home() {
       chunks = chunks.flatMap((c) => chunkText(c, 600));
       setProgress(0.4);
       await tick();
-      const out: string[] = [];
-      for (let i = 0; i < chunks.length; i++) {
-        setStatus(`Traduzione in corso (${i + 1} di ${chunks.length})`);
-        await tick();
-        out.push(await translateChunkLocally(chunks[i], src, tgt));
-        setResult(out.join('\n\n'));
-        await tick();
-        setProgress(0.4 + ((i + 1) / chunks.length) * 0.6);
-      }
+      const total = chunks.length;
+      const results: (string | undefined)[] = new Array(total);
+      let next = 0;
+      let doneCount = 0;
+      let failed = false;
+
+      // Mostra solo la parte già completata in ordine (dall'inizio, senza buchi).
+      const render = () => {
+        const parts: string[] = [];
+        for (let k = 0; k < total && results[k] !== undefined; k++) parts.push(results[k] as string);
+        setResult(parts.join('\n\n'));
+        setProgress(0.4 + (doneCount / total) * 0.6);
+        setStatus(`Traduzione in corso (${doneCount} di ${total})${size > 1 ? ` · ${size} traduttori in parallelo` : ''}`);
+      };
+
+      const lane = async () => {
+        while (!failed) {
+          const i = next++;
+          if (i >= total) return;
+          try {
+            results[i] = await translateChunkLocally(chunks[i], src, tgt);
+          } catch (err) {
+            failed = true;
+            throw err;
+          }
+          doneCount++;
+          render();
+          await tick();
+        }
+      };
+      render();
+      await Promise.all(Array.from({ length: size }, lane));
+      setResult((results as string[]).join('\n\n'));
 
       setProgress(1);
       setStatus('Traduzione completata');
