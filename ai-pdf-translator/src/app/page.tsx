@@ -179,7 +179,6 @@ export default function Home() {
       <h1>Traduci PDF senza limiti</h1>
       <p className="sub">
         Carica un documento e ricevi l&apos;intera traduzione.<br />
-        Nessun limite di pagine, nessuna registrazione: tutto resta sul tuo dispositivo.
       </p>
 
       <div
